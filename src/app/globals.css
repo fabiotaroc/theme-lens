@@ -1,26 +1,79 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f7f4ec;
+  --foreground: #182428;
+  --surface: #f7f4ec;
+  --surface-soft: #fffaf0;
+  --surface-muted: #edf1e8;
+  --card: rgba(255, 255, 255, 0.82);
+  --ink: #182428;
+  --ink-strong: #0f191c;
+  --muted: #5c6b67;
+  --accent: #7fd0c6;
+  --accent-strong: #147f7a;
+  --accent-deep: #0f6460;
+  --tone-positive: #5fbf8d;
+  --tone-neutral: #d0b86a;
+  --tone-negative: #d16f5b;
+  --tone-negative-ink: #7d2616;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-background: var(--surface);
+  --color-foreground: var(--ink);
+  --font-sans: var(--font-manrope);
+  --font-display: var(--font-fraunces);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background:
+    radial-gradient(circle at top left, rgba(255, 230, 170, 0.4), transparent 26%),
+    radial-gradient(circle at top right, rgba(127, 208, 198, 0.3), transparent 22%),
+    linear-gradient(180deg, #fbf8f0 0%, #f6f1e6 100%);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(255, 230, 170, 0.18), transparent 24%),
+    radial-gradient(circle at top right, rgba(127, 208, 198, 0.14), transparent 22%),
+    var(--surface);
+  color: var(--ink);
+  font-family: var(--font-manrope), sans-serif;
+}
+
+::selection {
+  background: rgba(20, 127, 122, 0.18);
+}
+
+a,
+button,
+input,
+select {
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid rgba(20, 127, 122, 0.36);
+  outline-offset: 2px;
+}
+
+table {
+  border-collapse: collapse;
 }

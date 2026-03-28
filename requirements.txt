@@ -1,0 +1,6 @@
+fastapi
+hdbscan
+numpy
+openai
+scikit-learn
+uvicorn
