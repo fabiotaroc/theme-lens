@@ -1,14 +1,24 @@
 # ThemeLens
 
-ThemeLens is an MVP web app for turning uploaded qualitative datasets into a fast first-pass insight pack.
+ThemeLens is a qualitative insights workspace for turning raw feedback exports into structured themes, evidence-backed findings, and ready-to-share reports.
 
-The workflow is:
+The product flow is:
 
-1. Upload a `CSV` or `XLSX`.
-2. Inspect the suggested text column and optional metadata columns.
-3. Generate initial themes with supporting evidence.
-4. Rename, merge, or hide themes.
-5. Download a lightweight HTML report.
+1. Upload a `CSV` or Excel dataset.
+2. Inspect the inferred text column and supporting metadata fields.
+3. Generate a dashboard of high-level insights and theme clusters.
+4. Refine themes by renaming, merging, or hiding them.
+5. Review the report page and export a lightweight HTML report.
+
+## Experience
+
+ThemeLens now ships as a route-based multi-page app:
+
+- `/` for the product landing page
+- `/app/upload` for dataset intake
+- `/app/inspect` for column confirmation and sample-row review
+- `/app/insights` for the main dashboard and theme workspace
+- `/app/report` for the share-ready summary view
 
 ## Stack
 
@@ -27,12 +37,18 @@ The analysis approach is inspired by the reference topic-modelling project in `/
 - cluster similar responses
 - generate readable theme labels
 
-In this MVP:
+In this repository:
 
-- Next.js handles upload, spreadsheet parsing, preview, and report export
+- Next.js handles the product UI, route-based workflow, session-backed workspace state, spreadsheet parsing, and report export
 - Python handles preprocessing, OpenAI embeddings, PCA, HDBSCAN topic discovery, and stable label generation
-- Short tag-like entries stay out of semantic clustering and true outliers remain visible in an unclustered bucket
-- The UI surfaces run diagnostics such as cluster count, unclustered share, and theme confidence
+- The app separates high-level insights from cluster-level detail so users can scan the summary before inspecting evidence
+- Technical diagnostics remain available, but they are secondary to upload, inspect, and actionable findings
+
+## Session model
+
+- The app uses a server-side workspace session abstraction so preview and analysis state can persist across the multi-page flow.
+- The current adapter in this repo is memory-backed and designed to be replaced by a durable store when deploying beyond local or single-instance use.
+- Theme edits such as rename, merge, hide, and selected-theme state are synchronized back into the workspace session.
 
 ## Run locally
 
@@ -60,7 +76,7 @@ PYTHON_ANALYZE_URL=http://127.0.0.1:8000/api/python_analyze
 
 - Empty rows are dropped before analysis.
 - Clusterable comments stay as individual rows so repeated wording can strengthen theme detection.
-- Very short and tag-like entries are excluded from semantic clustering and reported separately.
-- HDBSCAN is the primary clustering method, followed by a nearest-theme reassignment pass for noise points; deterministic k-means is used when density clustering still leaves too much unresolved structure.
+- Short comments are retained for semantic clustering; only obvious code-like tag entries are excluded and reported separately.
+- HDBSCAN is the primary clustering method, using a small parameter search and nearest-theme reassignment for noise points; deterministic k-means is used only when none of the HDBSCAN candidates produce a reasonable topic split.
 - Rows that do not fit a dense theme stay visible in an `Unclustered feedback` bucket instead of being silently forced into a topic.
 - Sentiment is heuristic and directional only.

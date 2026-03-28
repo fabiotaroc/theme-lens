@@ -1,0 +1,17 @@
+---
+description: Project overview and architecture context for ThemeLens
+alwaysApply: true
+---
+
+# ThemeLens Project Overview
+
+- ThemeLens is a qualitative insights workspace that turns CSV or Excel feedback exports into themes, evidence-backed findings, and lightweight reports.
+- The core user flow is route-based: `/` landing, `/app/upload`, `/app/inspect`, `/app/insights`, and `/app/report`.
+- The frontend is a Next.js 16 App Router app with React 19 and Tailwind CSS v4.
+- The backend analysis pipeline lives in `api/python_analyze.py` and handles preprocessing, embeddings, dimensionality reduction, clustering, and theme labeling.
+- The app uses a server-side workspace session abstraction to persist preview, analysis, and theme-edit state across the multi-page flow.
+- Theme edits such as rename, merge, hide, and selected-theme state should stay synchronized with workspace session state.
+- Keep the product optimized for insight review: summary-first UX, cluster detail second, and diagnostics available but secondary.
+- Spreadsheet parsing and report export live in the Next.js app; semantic analysis is delegated to the Python service.
+- Local development expects `npm run dev` for Next.js and `npm run dev:python` for the FastAPI service.
+- This repo uses a newer Next.js version with breaking changes, so check the bundled Next.js docs in `node_modules/next/dist/docs/` before relying on older conventions.

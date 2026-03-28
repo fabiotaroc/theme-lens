@@ -41,7 +41,7 @@ export function validateUpload(file: File) {
   }
 
   if (file.size > 10 * 1024 * 1024) {
-    throw new Error("The MVP supports files up to 10 MB.");
+    throw new Error("ThemeLens currently supports files up to 10 MB.");
   }
 }
 

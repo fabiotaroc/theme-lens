@@ -145,3 +145,36 @@ export interface AnalysisResponse {
   report: ReportOutline;
   generatedAt: string;
 }
+
+export interface EditableTheme extends ThemeInsight {
+  hidden: boolean;
+}
+
+export type WorkflowStep = "upload" | "inspect" | "insights" | "report";
+
+export interface SessionHistoryEntry {
+  id: string;
+  fileName: string;
+  headline: string;
+  topThemeLabel: string | null;
+  analyzedRows: number;
+  updatedAt: string;
+}
+
+export interface WorkspaceSnapshot {
+  id: string;
+  step: WorkflowStep;
+  fileName: string | null;
+  preview: DatasetPreview | null;
+  analysis: AnalysisResponse | null;
+  themes: EditableTheme[];
+  textColumn: string;
+  metadataColumns: string[];
+  selectedThemeId: string | null;
+  updatedAt: string | null;
+}
+
+export interface WorkspaceSessionPayload {
+  workspace: WorkspaceSnapshot;
+  history: SessionHistoryEntry[];
+}

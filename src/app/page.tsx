@@ -1,5 +1,5 @@
-import { ThemeLensApp } from "@/components/theme-lens-app";
+import { LandingPage } from "@/components/landing-page";
 
 export default function Home() {
-  return <ThemeLensApp />;
+  return <LandingPage />;
 }

@@ -13,9 +13,12 @@ const fraunces = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "ThemeLens",
+  title: {
+    default: "ThemeLens",
+    template: "%s | ThemeLens",
+  },
   description:
-    "Upload qualitative feedback datasets and turn them into editable, evidence-backed insight packs.",
+    "Turn qualitative feedback exports into structured themes, evidence-backed insights, and ready-to-share reports.",
 };
 
 export default function RootLayout({

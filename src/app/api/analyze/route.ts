@@ -3,6 +3,11 @@ import {
   requestPythonAnalysis,
 } from "@/lib/analysis-client";
 import { buildPreview, parseSpreadsheet, validateUpload } from "@/lib/dataset";
+import {
+  getParsedWorkbookForCurrentSession,
+  storeAnalysisSession,
+} from "@/lib/session-store";
+import { NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 
@@ -24,15 +29,20 @@ export async function POST(request: Request) {
       String(formData.get("metadataColumns") ?? "[]"),
     ) as string[];
 
-    if (!(file instanceof File)) {
-      return Response.json(
-        { error: "Upload a CSV or Excel file to continue." },
+    let parsedWorkbook = await getParsedWorkbookForCurrentSession();
+
+    if (file instanceof File) {
+      validateUpload(file);
+      parsedWorkbook = await parseSpreadsheet(file);
+    }
+
+    if (!parsedWorkbook) {
+      return NextResponse.json(
+        { error: "Upload and inspect a CSV or Excel file before running analysis." },
         { status: 400 },
       );
     }
 
-    validateUpload(file);
-    const parsedWorkbook = await parseSpreadsheet(file);
     const preview = buildPreview(parsedWorkbook);
 
     const finalTextColumn =
@@ -55,15 +65,36 @@ export async function POST(request: Request) {
       filteredMetadataColumns,
       preview.languageHint,
     );
+    console.info("[theme-lens][analyze-route] Starting analysis request", {
+      fileName: payload.fileName,
+      sheetName: payload.sheetName,
+      totalRows: payload.totalRows,
+      textColumn: payload.textColumn,
+      metadataColumnCount: payload.metadataColumns.length,
+    });
     const result = await requestPythonAnalysis(
       resolvePythonAnalysisUrl(request),
       payload,
     );
+    console.info("[theme-lens][analyze-route] Analysis request completed", {
+      themeCount: result.themes.length,
+      analyzedRows: result.summary.analyzedRows,
+      clusteringMethod: result.summary.diagnostics.clusteringMethod,
+    });
 
-    return Response.json(result);
+    return NextResponse.json(
+      await storeAnalysisSession({
+        analysis: result,
+        textColumn: finalTextColumn,
+        metadataColumns: filteredMetadataColumns,
+      }),
+    );
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Analysis failed for this dataset.";
-    return Response.json({ error: message }, { status: 400 });
+    console.error("[theme-lens][analyze-route] Analysis request failed", {
+      error: message,
+    });
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 }

@@ -1,4 +1,7 @@
+import { NextResponse } from "next/server";
+
 import { buildPreview, parseSpreadsheet, validateUpload } from "@/lib/dataset";
+import { storePreviewSession } from "@/lib/session-store";
 
 export const runtime = "nodejs";
 
@@ -18,10 +21,15 @@ export async function POST(request: Request) {
     const parsedWorkbook = await parseSpreadsheet(file);
     const preview = buildPreview(parsedWorkbook);
 
-    return Response.json(preview);
+    return NextResponse.json(
+      await storePreviewSession({
+        parsedWorkbook,
+        preview,
+      }),
+    );
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Could not inspect the uploaded file.";
-    return Response.json({ error: message }, { status: 400 });
+    return NextResponse.json({ error: message }, { status: 400 });
   }
 }

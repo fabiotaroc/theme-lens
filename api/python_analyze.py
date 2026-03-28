@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 from datetime import datetime
+from time import perf_counter
 from collections import Counter
 from typing import Any
 
@@ -65,13 +66,34 @@ LOW_CONFIDENCE_THRESHOLD = 0.45
 HDBSCAN_MIN_CLUSTER_SIZE_FLOOR = 3
 HDBSCAN_MIN_CLUSTER_SIZE_CAP = 8
 HDBSCAN_MIN_SAMPLES = 1
-NOISE_RATIO_FALLBACK_THRESHOLD = 0.4
-DOMINANT_CLUSTER_FALLBACK_THRESHOLD = 0.8
 NOISE_REASSIGNMENT_SIMILARITY_THRESHOLD = 0.82
 NOISE_REASSIGNMENT_MARGIN_THRESHOLD = 0.04
 DOMINANT_CLUSTER_REASSIGNMENT_SIMILARITY_THRESHOLD = 0.9
 KMEANS_TARGET_MAX_CLUSTER_SHARE = 0.55
 KMEANS_DOMINANT_CLUSTER_PENALTY = 0.8
+HDBSCAN_SEARCH_MIN_CLUSTER_COUNT = 3
+HDBSCAN_SEARCH_MAX_NOISE_RATIO = 0.45
+HDBSCAN_SEARCH_MAX_DOMINANT_CLUSTER_SHARE = 0.65
+HDBSCAN_SEARCH_TARGET_DOMINANT_CLUSTER_SHARE = 0.5
+# Upper bound: cap at sqrt(n)*0.5, never more than 20 reviewable themes.
+HDBSCAN_SEARCH_MAX_CLUSTER_COUNT_FACTOR = 0.5
+HDBSCAN_SEARCH_MAX_CLUSTER_COUNT_CAP = 20
+# Lower bound on average cluster size: each theme must cover at least sqrt(n)*0.3 rows.
+HDBSCAN_SEARCH_MIN_AVG_CLUSTER_SIZE_FACTOR = 0.3
+
+
+def log_progress(
+    run_id: str,
+    stage: str,
+    message: str,
+    started_at: float | None = None,
+) -> None:
+    elapsed = f" +{perf_counter() - started_at:.1f}s" if started_at is not None else ""
+    timestamp = datetime.utcnow().strftime("%H:%M:%S")
+    print(
+        f"[theme-lens][analysis:{run_id}][{stage}]{elapsed} {message}",
+        flush=True,
+    )
 
 COMMON_STOPWORDS = [
     "a",
@@ -331,25 +353,40 @@ def is_tag_like(text: str) -> bool:
         return False
 
     tokens = stripped.split()
+    compact = stripped.replace(" ", "")
     letters = re.findall(r"[A-Za-zÀ-ÿ]", stripped)
-    punctuation_count = len(re.findall(r"[.,;:!?]", stripped))
+    digit_count = len(re.findall(r"\d", stripped))
+    separator_count = len(re.findall(r"[_\-/]", stripped))
     uppercase_letters = "".join(ch for ch in stripped if ch.isalpha())
 
-    if re.fullmatch(r"[A-Z0-9_\-/ ]{2,32}", stripped) and len(tokens) <= 4:
+    # Keep short natural-language comments in the analysis, including single-word entries.
+    if len(tokens) == 1 and digit_count == 0 and stripped.lower() == stripped:
+        return False
+
+    if (
+        re.fullmatch(r"[A-Z0-9_\-/ ]{2,32}", stripped)
+        and len(tokens) <= 4
+        and (digit_count > 0 or separator_count > 0)
+    ):
         return True
-    if len(tokens) <= 3 and punctuation_count == 0 and stripped.upper() == stripped:
+    if (
+        len(tokens) <= 4
+        and digit_count > 0
+        and separator_count > 0
+        and len(compact) <= 32
+    ):
         return True
-    if len(tokens) <= 2 and len(letters) <= 18 and punctuation_count == 0:
+    if len(tokens) >= 2 and len(tokens) <= 4 and stripped.upper() == stripped and len(letters) <= 24:
         return True
-    if uppercase_letters and uppercase_letters == uppercase_letters.upper() and len(tokens) <= 3:
+    if (
+        uppercase_letters
+        and uppercase_letters == uppercase_letters.upper()
+        and len(tokens) <= 4
+        and digit_count > 0
+    ):
         return True
 
     return False
-
-
-def is_short_comment(text: str) -> bool:
-    tokens = tokenize_words(text)
-    return len(tokens) < 3 or len(text) < 15
 
 
 def average(values: list[float]) -> float:
@@ -365,12 +402,33 @@ def average_sentiment_breakdown(rows: list[dict[str, Any]]) -> dict[str, int]:
     return breakdown
 
 
-def build_embeddings(client: OpenAI, texts: list[str]) -> np.ndarray:
+def build_embeddings(
+    client: OpenAI,
+    texts: list[str],
+    run_id: str | None = None,
+    started_at: float | None = None,
+) -> np.ndarray:
     embeddings: list[list[float]] = []
+    total_batches = max(1, math.ceil(len(texts) / EMBEDDING_BATCH_SIZE))
+    if run_id:
+        log_progress(
+            run_id,
+            "embeddings",
+            f"Requesting embeddings for {len(texts)} comments across {total_batches} batch(es).",
+            started_at,
+        )
     for start in range(0, len(texts), EMBEDDING_BATCH_SIZE):
         batch = texts[start : start + EMBEDDING_BATCH_SIZE]
         response = client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
         embeddings.extend(item.embedding for item in response.data)
+        if run_id:
+            batch_number = (start // EMBEDDING_BATCH_SIZE) + 1
+            log_progress(
+                run_id,
+                "embeddings",
+                f"Completed embedding batch {batch_number}/{total_batches} ({len(batch)} comments).",
+                started_at,
+            )
     return np.array(embeddings, dtype=np.float32)
 
 
@@ -399,21 +457,204 @@ def largest_cluster_share(labels: np.ndarray) -> float:
     return max(counts.values()) / len(valid_labels)
 
 
-def cluster_with_hdbscan(points: np.ndarray) -> tuple[np.ndarray, np.ndarray, bool]:
+def cluster_with_hdbscan(
+    points: np.ndarray,
+    min_cluster_size: int,
+    min_samples: int,
+) -> tuple[np.ndarray, np.ndarray]:
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=max(
-            HDBSCAN_MIN_CLUSTER_SIZE_FLOOR,
-            min(HDBSCAN_MIN_CLUSTER_SIZE_CAP, math.ceil(math.sqrt(len(points)) * 0.75)),
-        ),
-        min_samples=HDBSCAN_MIN_SAMPLES,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
         metric="euclidean",
         cluster_selection_method="eom",
         prediction_data=False,
     )
     labels = clusterer.fit_predict(points)
     probabilities = getattr(clusterer, "probabilities_", np.zeros(len(points), dtype=float))
-    valid_labels = sorted({int(label) for label in labels if label >= 0})
-    return labels, probabilities, len(valid_labels) >= 2
+    return labels, probabilities
+
+
+def build_hdbscan_parameter_grid(point_count: int) -> list[tuple[int, int]]:
+    if point_count < 6:
+        return []
+
+    sqrt_count = math.sqrt(point_count)
+
+    # Dynamic floor: don't try trivially small cluster sizes for large datasets.
+    # At 1000 rows this gives floor=10; at 100 rows, floor=3.
+    dynamic_floor = max(HDBSCAN_MIN_CLUSTER_SIZE_FLOOR, math.ceil(sqrt_count * 0.3))
+
+    size_candidates = {
+        dynamic_floor,
+        math.ceil(sqrt_count * 0.4),
+        math.ceil(sqrt_count * 0.6),
+        math.ceil(sqrt_count * 0.8),
+        math.ceil(sqrt_count),
+        math.ceil(sqrt_count * 1.25),
+        math.ceil(sqrt_count * 1.6),
+        math.ceil(sqrt_count * 2.0),
+    }
+    valid_sizes = sorted(
+        size
+        for size in size_candidates
+        if dynamic_floor <= size < point_count
+    )
+    sample_candidates = [HDBSCAN_MIN_SAMPLES, 2, 4]
+
+    grid: list[tuple[int, int]] = []
+    for min_cluster_size in valid_sizes:
+        for min_samples in sample_candidates:
+            if min_samples > min_cluster_size:
+                continue
+            grid.append((min_cluster_size, min_samples))
+    return grid
+
+
+def evaluate_hdbscan_candidate(
+    labels: np.ndarray,
+    confidences: np.ndarray,
+) -> dict[str, float | int | bool]:
+    n = len(labels)
+    sqrt_n = math.sqrt(n)
+    cluster_ids = sorted({int(label) for label in labels if label >= 0})
+    cluster_count = len(cluster_ids)
+    clustered_mask = labels >= 0
+    total_clustered = int(np.sum(clustered_mask))
+    clustered_confidence = (
+        float(np.mean(confidences[clustered_mask])) if np.any(clustered_mask) else 0.0
+    )
+    noise_ratio = float(np.mean(labels < 0))
+    dominant_cluster_share = largest_cluster_share(labels)
+    avg_cluster_size = total_clustered / max(cluster_count, 1)
+
+    minimum_cluster_count = HDBSCAN_SEARCH_MIN_CLUSTER_COUNT if n >= 15 else 2
+    # Upper bound: never produce more themes than a researcher can meaningfully review.
+    maximum_cluster_count = max(
+        minimum_cluster_count + 1,
+        min(
+            HDBSCAN_SEARCH_MAX_CLUSTER_COUNT_CAP,
+            math.ceil(sqrt_n * HDBSCAN_SEARCH_MAX_CLUSTER_COUNT_FACTOR),
+        ),
+    )
+    # Each theme must represent a meaningful slice, not a handful of near-duplicates.
+    min_avg_cluster_size = max(5.0, sqrt_n * HDBSCAN_SEARCH_MIN_AVG_CLUSTER_SIZE_FACTOR)
+
+    is_valid = (
+        cluster_count >= minimum_cluster_count
+        and cluster_count <= maximum_cluster_count
+        and avg_cluster_size >= min_avg_cluster_size
+        and noise_ratio <= HDBSCAN_SEARCH_MAX_NOISE_RATIO
+        and dominant_cluster_share <= HDBSCAN_SEARCH_MAX_DOMINANT_CLUSTER_SHARE
+    )
+
+    noise_score = 1.0 - min(noise_ratio / max(HDBSCAN_SEARCH_MAX_NOISE_RATIO, 1e-6), 1.0)
+    dominant_penalty = max(
+        0.0,
+        dominant_cluster_share - HDBSCAN_SEARCH_TARGET_DOMINANT_CLUSTER_SHARE,
+    )
+    balance_score = max(0.0, 1.0 - (dominant_penalty / 0.5))
+    # Reward moderate cluster counts — penalty for being far from the midpoint of the valid range.
+    ideal_cluster_count = (minimum_cluster_count + maximum_cluster_count) / 2.0
+    cluster_count_score = max(
+        0.0,
+        1.0 - abs(cluster_count - ideal_cluster_count) / max(ideal_cluster_count, 1),
+    )
+    score = (
+        clustered_confidence * 0.45
+        + noise_score * 0.25
+        + balance_score * 0.2
+        + cluster_count_score * 0.1
+    )
+    return {
+        "cluster_count": cluster_count,
+        "clustered_confidence": clustered_confidence,
+        "noise_ratio": noise_ratio,
+        "dominant_cluster_share": dominant_cluster_share,
+        "avg_cluster_size": avg_cluster_size,
+        "score": score,
+        "is_valid": is_valid,
+    }
+
+
+def search_hdbscan_clusters(
+    reduced_points: np.ndarray,
+    embeddings: np.ndarray,
+    run_id: str | None = None,
+    started_at: float | None = None,
+) -> dict[str, Any] | None:
+    best_result: dict[str, Any] | None = None
+    best_rank: tuple[float, float, float, int] | None = None
+    valid_candidates = 0
+    parameter_grid = build_hdbscan_parameter_grid(len(reduced_points))
+
+    if run_id:
+        log_progress(
+            run_id,
+            "cluster",
+            f"Trying HDBSCAN auto-tuning across {len(parameter_grid)} parameter set(s).",
+            started_at,
+        )
+
+    for min_cluster_size, min_samples in parameter_grid:
+        labels, confidences = cluster_with_hdbscan(
+            reduced_points,
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+        )
+        labels, confidences, reassigned_noise_rows = reassign_noise_points(
+            embeddings,
+            labels,
+            confidences,
+        )
+        evaluation = evaluate_hdbscan_candidate(labels, confidences)
+        if not bool(evaluation["is_valid"]):
+            continue
+
+        valid_candidates += 1
+
+        rank = (
+            float(evaluation["score"]),
+            float(evaluation["clustered_confidence"]),
+            -float(evaluation["noise_ratio"]),
+            int(evaluation["cluster_count"]),
+        )
+        if best_rank is not None and rank <= best_rank:
+            continue
+
+        best_rank = rank
+        best_result = {
+            "labels": labels,
+            "confidences": confidences,
+            "reassigned_noise_rows": reassigned_noise_rows,
+            "cluster_count": int(evaluation["cluster_count"]),
+            "min_cluster_size": min_cluster_size,
+            "min_samples": min_samples,
+        }
+
+    if run_id:
+        if best_result is None:
+            log_progress(
+                run_id,
+                "cluster",
+                "HDBSCAN did not find a stable clustering result; falling back to KMeans.",
+                started_at,
+            )
+        else:
+            log_progress(
+                run_id,
+                "cluster",
+                (
+                    "Selected HDBSCAN config "
+                    f"(min_cluster_size={best_result['min_cluster_size']}, "
+                    f"min_samples={best_result['min_samples']}, "
+                    f"clusters={best_result['cluster_count']}, "
+                    f"valid_candidates={valid_candidates}, "
+                    f"reassigned_noise_rows={best_result['reassigned_noise_rows']})."
+                ),
+                started_at,
+            )
+
+    return best_result
 
 
 def reassign_noise_points(
@@ -492,11 +733,23 @@ def kmeans_confidences(points: np.ndarray, labels: np.ndarray, centroids: np.nda
     return np.clip(confidences, 0.0, 1.0)
 
 
-def cluster_with_kmeans(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def cluster_with_kmeans(
+    points: np.ndarray,
+    run_id: str | None = None,
+    started_at: float | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     max_clusters = min(8, max(2, int(math.sqrt(len(points)))))
     best_candidate: tuple[float, float, int] | None = None
     best_labels: np.ndarray | None = None
     best_centroids: np.ndarray | None = None
+
+    if run_id:
+        log_progress(
+            run_id,
+            "cluster",
+            f"Trying KMeans fallback with cluster counts from 2 to {max_clusters}.",
+            started_at,
+        )
 
     for cluster_count in range(2, max_clusters + 1):
         model = KMeans(n_clusters=cluster_count, random_state=42, n_init=10)
@@ -522,9 +775,23 @@ def cluster_with_kmeans(points: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         fallback = KMeans(n_clusters=1, random_state=42, n_init=10).fit(points)
         labels = fallback.labels_
         centroids = fallback.cluster_centers_
+        if run_id:
+            log_progress(
+                run_id,
+                "cluster",
+                "KMeans fallback collapsed to a single cluster.",
+                started_at,
+            )
     else:
         labels = best_labels
         centroids = best_centroids
+        if run_id:
+            log_progress(
+                run_id,
+                "cluster",
+                f"KMeans selected {len(set(labels.tolist()))} clusters.",
+                started_at,
+            )
 
     return labels, kmeans_confidences(points, labels, centroids)
 
@@ -699,13 +966,9 @@ def summarize_notes(
         "Theme labels are AI-generated and should be reviewed before external sharing.",
         "Sentiment is directional only and should be treated as a rough signal.",
     ]
-    if excluded_short_rows:
-        notes.append(
-            f"{excluded_short_rows} very short comments were excluded from semantic clustering."
-        )
     if excluded_taglike_rows:
         notes.append(
-            f"{excluded_taglike_rows} short tag-like entries were excluded from semantic clustering."
+            f"{excluded_taglike_rows} obvious code-like tag entries were excluded from semantic clustering."
         )
     if unclustered_rows:
         notes.append(
@@ -784,6 +1047,8 @@ def build_metadata_value_counts(
 
 
 def analyze_payload(payload: AnalysisPayload) -> dict[str, Any]:
+    run_id = datetime.utcnow().strftime("%H%M%S%f")[-8:]
+    started_at = perf_counter()
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(
@@ -792,6 +1057,16 @@ def analyze_payload(payload: AnalysisPayload) -> dict[str, Any]:
         )
 
     client = OpenAI(api_key=api_key)
+
+    log_progress(
+        run_id,
+        "start",
+        (
+            f"Starting analysis for {payload.fileName} "
+            f"({payload.sheetName or 'no sheet'}) with {payload.totalRows} row(s)."
+        ),
+        started_at,
+    )
 
     usable_rows = 0
     removed_empty_rows = 0
@@ -816,9 +1091,6 @@ def analyze_payload(payload: AnalysisPayload) -> dict[str, Any]:
         if is_tag_like(text):
             assignment_type = "excluded_taglike"
             excluded_taglike_rows += 1
-        elif is_short_comment(text):
-            assignment_type = "excluded_short"
-            excluded_short_rows += 1
         else:
             assignment_type = "clustered"
 
@@ -849,6 +1121,17 @@ def analyze_payload(payload: AnalysisPayload) -> dict[str, Any]:
 
     texts = [entry["text"] for entry in entries]
 
+    log_progress(
+        run_id,
+        "prep",
+        (
+            f"Prepared {len(texts)} clusterable comment(s); usable_rows={usable_rows}, "
+            f"empty_rows={removed_empty_rows}, taglike_rows={excluded_taglike_rows}, "
+            f"duplicate_rows={duplicate_rows}."
+        ),
+        started_at,
+    )
+
     themes: list[dict[str, Any]] = []
     cluster_count = 0
     unclustered_row_count = 0
@@ -857,43 +1140,77 @@ def analyze_payload(payload: AnalysisPayload) -> dict[str, Any]:
     reassigned_noise_rows = 0
 
     if texts:
-        embeddings = build_embeddings(client, texts)
+        embeddings = build_embeddings(client, texts, run_id=run_id, started_at=started_at)
+        log_progress(
+            run_id,
+            "reduce",
+            f"Reducing embedding vectors from shape {embeddings.shape}.",
+            started_at,
+        )
         reduced = reduce_dimensions(embeddings)
+        log_progress(
+            run_id,
+            "reduce",
+            f"Reduced point matrix shape is {reduced.shape}.",
+            started_at,
+        )
 
         if len(texts) >= 6:
-            labels, confidences, has_clusters = cluster_with_hdbscan(reduced)
-            labels, confidences, reassigned_noise_rows = reassign_noise_points(
+            hdbscan_result = search_hdbscan_clusters(
+                reduced,
                 embeddings,
-                labels,
-                confidences,
+                run_id=run_id,
+                started_at=started_at,
             )
-            clustering_method = (
-                "HDBSCAN + noise reassignment"
-                if reassigned_noise_rows
-                else "HDBSCAN"
-            )
-            post_reassignment_noise_ratio = float(np.mean(labels < 0))
-            dominant_cluster_share = largest_cluster_share(labels)
-            if (
-                not has_clusters
-                or post_reassignment_noise_ratio > NOISE_RATIO_FALLBACK_THRESHOLD
-                or dominant_cluster_share > DOMINANT_CLUSTER_FALLBACK_THRESHOLD
-            ):
-                labels, confidences = cluster_with_kmeans(reduced)
+            if hdbscan_result is not None:
+                labels = hdbscan_result["labels"]
+                confidences = hdbscan_result["confidences"]
+                reassigned_noise_rows = hdbscan_result["reassigned_noise_rows"]
+                clustering_method = (
+                    "HDBSCAN auto-tuned + noise reassignment"
+                    if reassigned_noise_rows
+                    else "HDBSCAN auto-tuned"
+                )
+            else:
+                labels, confidences = cluster_with_kmeans(
+                    reduced,
+                    run_id=run_id,
+                    started_at=started_at,
+                )
                 clustering_method = "KMeans fallback"
                 used_fallback_clustering = True
                 reassigned_noise_rows = 0
         elif len(texts) >= 2:
-            labels, confidences = cluster_with_kmeans(reduced)
+            labels, confidences = cluster_with_kmeans(
+                reduced,
+                run_id=run_id,
+                started_at=started_at,
+            )
             clustering_method = "KMeans fallback"
             used_fallback_clustering = True
         else:
             labels = np.full(len(texts), -1, dtype=int)
             confidences = np.zeros(len(texts), dtype=float)
             clustering_method = "single-comment bucket"
+            log_progress(
+                run_id,
+                "cluster",
+                "Only one clusterable comment remained; skipping clustering.",
+                started_at,
+            )
 
         cluster_ids = sorted(label for label in set(labels.tolist()) if label >= 0)
         cluster_count = len(cluster_ids)
+
+        log_progress(
+            run_id,
+            "cluster",
+            (
+                f"Clustering produced {cluster_count} theme cluster(s) "
+                f"and {int(np.sum(labels < 0))} unclustered comment(s)."
+            ),
+            started_at,
+        )
 
         theme_inputs: list[dict[str, Any]] = []
         cluster_theme_data: list[dict[str, Any]] = []
@@ -952,8 +1269,26 @@ def analyze_payload(payload: AnalysisPayload) -> dict[str, Any]:
             )
 
         try:
+            log_progress(
+                run_id,
+                "label",
+                f"Generating AI labels for {len(theme_inputs)} clustered theme(s).",
+                started_at,
+            )
             labels_by_theme_id = label_themes_with_gpt(client, theme_inputs)
-        except Exception:
+            log_progress(
+                run_id,
+                "label",
+                f"Received {len(labels_by_theme_id)} AI-generated theme label(s).",
+                started_at,
+            )
+        except Exception as error:
+            log_progress(
+                run_id,
+                "label",
+                f"Theme labeling failed; keeping fallback labels. Error: {error}",
+                started_at,
+            )
             labels_by_theme_id = {}
 
         for theme in cluster_theme_data:
@@ -1001,6 +1336,12 @@ def analyze_payload(payload: AnalysisPayload) -> dict[str, Any]:
             )
     else:
         clustering_method = "no clusterable comments"
+        log_progress(
+            run_id,
+            "cluster",
+            "No clusterable comments remained after preprocessing.",
+            started_at,
+        )
 
     analyzed_rows = sum(theme["count"] for theme in themes)
     clustered_rows = sum(theme["count"] for theme in themes if theme["kind"] == "cluster")
@@ -1062,6 +1403,17 @@ def analyze_payload(payload: AnalysisPayload) -> dict[str, Any]:
             "reassignedNoiseRows": reassigned_noise_rows,
         },
     }
+
+    log_progress(
+        run_id,
+        "done",
+        (
+            f"Finished analysis with {len(themes)} theme(s), {clustered_rows} clustered row(s), "
+            f"{unclustered_row_count} unclustered row(s), "
+            f"and method '{clustering_method}'."
+        ),
+        started_at,
+    )
 
     return {
         "summary": summary,
