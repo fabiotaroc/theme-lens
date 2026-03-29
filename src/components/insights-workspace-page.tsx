@@ -51,6 +51,8 @@ export function InsightsWorkspacePage() {
           eyebrow="Insights"
           title="Review the most important findings first."
           description="This page separates the executive overview from the detailed theme workspace so users can move from summary to evidence without getting lost in the interface."
+          descriptionPlacement="popover"
+          descriptionInfoLabel="How the insights page is organized"
         />
         <EmptyState
           title="No analysis is available yet"

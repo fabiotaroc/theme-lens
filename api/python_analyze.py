@@ -80,6 +80,16 @@ HDBSCAN_SEARCH_MAX_CLUSTER_COUNT_FACTOR = 0.5
 HDBSCAN_SEARCH_MAX_CLUSTER_COUNT_CAP = 20
 # Lower bound on average cluster size: each theme must cover at least sqrt(n)*0.3 rows.
 HDBSCAN_SEARCH_MIN_AVG_CLUSTER_SIZE_FACTOR = 0.3
+PCA_TARGET_DIMENSIONS = 15
+
+# Relaxed pass: accept higher noise (aggressive reassignment rescues most of it),
+# tolerate 2 clusters, and allow a larger dominant cluster.
+HDBSCAN_RELAXED_MAX_NOISE_RATIO = 0.75
+HDBSCAN_RELAXED_MAX_DOMINANT_CLUSTER_SHARE = 0.80
+HDBSCAN_RELAXED_MIN_CLUSTER_COUNT = 2
+HDBSCAN_RELAXED_NOISE_SIMILARITY_THRESHOLD = 0.50
+HDBSCAN_RELAXED_NOISE_MARGIN_THRESHOLD = 0.0
+HDBSCAN_RELAXED_DOMINANT_SIMILARITY_THRESHOLD = 0.60
 
 
 def log_progress(
@@ -433,14 +443,16 @@ def build_embeddings(
 
 
 def reduce_dimensions(embeddings: np.ndarray) -> np.ndarray:
-    if embeddings.shape[0] <= 2:
+    n_samples, n_features = embeddings.shape
+    if n_samples <= 2:
         return embeddings
 
-    n_components = min(30, embeddings.shape[0] - 1, embeddings.shape[1])
+    n_components = min(PCA_TARGET_DIMENSIONS, n_samples - 1, n_features)
     if n_components < 2:
         return embeddings
 
-    return PCA(n_components=n_components, random_state=42).fit_transform(embeddings)
+    reduced = PCA(n_components=n_components, random_state=42).fit_transform(embeddings)
+    return normalize_rows(reduced)
 
 
 def normalize_rows(matrix: np.ndarray) -> np.ndarray:
@@ -513,6 +525,9 @@ def build_hdbscan_parameter_grid(point_count: int) -> list[tuple[int, int]]:
 def evaluate_hdbscan_candidate(
     labels: np.ndarray,
     confidences: np.ndarray,
+    max_noise_ratio: float = HDBSCAN_SEARCH_MAX_NOISE_RATIO,
+    max_dominant_share: float = HDBSCAN_SEARCH_MAX_DOMINANT_CLUSTER_SHARE,
+    min_cluster_count_override: int | None = None,
 ) -> dict[str, float | int | bool]:
     n = len(labels)
     sqrt_n = math.sqrt(n)
@@ -527,8 +542,11 @@ def evaluate_hdbscan_candidate(
     dominant_cluster_share = largest_cluster_share(labels)
     avg_cluster_size = total_clustered / max(cluster_count, 1)
 
-    minimum_cluster_count = HDBSCAN_SEARCH_MIN_CLUSTER_COUNT if n >= 15 else 2
-    # Upper bound: never produce more themes than a researcher can meaningfully review.
+    minimum_cluster_count = (
+        min_cluster_count_override
+        if min_cluster_count_override is not None
+        else (HDBSCAN_SEARCH_MIN_CLUSTER_COUNT if n >= 15 else 2)
+    )
     maximum_cluster_count = max(
         minimum_cluster_count + 1,
         min(
@@ -536,24 +554,22 @@ def evaluate_hdbscan_candidate(
             math.ceil(sqrt_n * HDBSCAN_SEARCH_MAX_CLUSTER_COUNT_FACTOR),
         ),
     )
-    # Each theme must represent a meaningful slice, not a handful of near-duplicates.
     min_avg_cluster_size = max(5.0, sqrt_n * HDBSCAN_SEARCH_MIN_AVG_CLUSTER_SIZE_FACTOR)
 
     is_valid = (
         cluster_count >= minimum_cluster_count
         and cluster_count <= maximum_cluster_count
         and avg_cluster_size >= min_avg_cluster_size
-        and noise_ratio <= HDBSCAN_SEARCH_MAX_NOISE_RATIO
-        and dominant_cluster_share <= HDBSCAN_SEARCH_MAX_DOMINANT_CLUSTER_SHARE
+        and noise_ratio <= max_noise_ratio
+        and dominant_cluster_share <= max_dominant_share
     )
 
-    noise_score = 1.0 - min(noise_ratio / max(HDBSCAN_SEARCH_MAX_NOISE_RATIO, 1e-6), 1.0)
+    noise_score = 1.0 - min(noise_ratio / max(max_noise_ratio, 1e-6), 1.0)
     dominant_penalty = max(
         0.0,
         dominant_cluster_share - HDBSCAN_SEARCH_TARGET_DOMINANT_CLUSTER_SHARE,
     )
     balance_score = max(0.0, 1.0 - (dominant_penalty / 0.5))
-    # Reward moderate cluster counts — penalty for being far from the midpoint of the valid range.
     ideal_cluster_count = (minimum_cluster_count + maximum_cluster_count) / 2.0
     cluster_count_score = max(
         0.0,
@@ -576,41 +592,49 @@ def evaluate_hdbscan_candidate(
     }
 
 
-def search_hdbscan_clusters(
-    reduced_points: np.ndarray,
+def _select_best_from_grid(
+    raw_results: list[tuple[int, int, np.ndarray, np.ndarray]],
     embeddings: np.ndarray,
-    run_id: str | None = None,
-    started_at: float | None = None,
+    relaxed: bool,
 ) -> dict[str, Any] | None:
+    if relaxed:
+        sim_thresh = HDBSCAN_RELAXED_NOISE_SIMILARITY_THRESHOLD
+        margin_thresh = HDBSCAN_RELAXED_NOISE_MARGIN_THRESHOLD
+        dom_sim_thresh = HDBSCAN_RELAXED_DOMINANT_SIMILARITY_THRESHOLD
+        max_noise = HDBSCAN_RELAXED_MAX_NOISE_RATIO
+        max_dominant = HDBSCAN_RELAXED_MAX_DOMINANT_CLUSTER_SHARE
+        min_cc: int | None = HDBSCAN_RELAXED_MIN_CLUSTER_COUNT
+    else:
+        sim_thresh = NOISE_REASSIGNMENT_SIMILARITY_THRESHOLD
+        margin_thresh = NOISE_REASSIGNMENT_MARGIN_THRESHOLD
+        dom_sim_thresh = DOMINANT_CLUSTER_REASSIGNMENT_SIMILARITY_THRESHOLD
+        max_noise = HDBSCAN_SEARCH_MAX_NOISE_RATIO
+        max_dominant = HDBSCAN_SEARCH_MAX_DOMINANT_CLUSTER_SHARE
+        min_cc = None
+
     best_result: dict[str, Any] | None = None
     best_rank: tuple[float, float, float, int] | None = None
-    valid_candidates = 0
-    parameter_grid = build_hdbscan_parameter_grid(len(reduced_points))
 
-    if run_id:
-        log_progress(
-            run_id,
-            "cluster",
-            f"Trying HDBSCAN auto-tuning across {len(parameter_grid)} parameter set(s).",
-            started_at,
-        )
-
-    for min_cluster_size, min_samples in parameter_grid:
-        labels, confidences = cluster_with_hdbscan(
-            reduced_points,
-            min_cluster_size=min_cluster_size,
-            min_samples=min_samples,
-        )
-        labels, confidences, reassigned_noise_rows = reassign_noise_points(
+    for min_cluster_size, min_samples, raw_labels, raw_conf in raw_results:
+        labels = raw_labels.copy()
+        confidences = raw_conf.copy()
+        labels, confidences, reassigned = reassign_noise_points(
             embeddings,
             labels,
             confidences,
+            similarity_threshold=sim_thresh,
+            margin_threshold=margin_thresh,
+            dominant_similarity_threshold=dom_sim_thresh,
         )
-        evaluation = evaluate_hdbscan_candidate(labels, confidences)
+        evaluation = evaluate_hdbscan_candidate(
+            labels,
+            confidences,
+            max_noise_ratio=max_noise,
+            max_dominant_share=max_dominant,
+            min_cluster_count_override=min_cc,
+        )
         if not bool(evaluation["is_valid"]):
             continue
-
-        valid_candidates += 1
 
         rank = (
             float(evaluation["score"]),
@@ -625,11 +649,54 @@ def search_hdbscan_clusters(
         best_result = {
             "labels": labels,
             "confidences": confidences,
-            "reassigned_noise_rows": reassigned_noise_rows,
+            "reassigned_noise_rows": reassigned,
             "cluster_count": int(evaluation["cluster_count"]),
+            "noise_ratio": float(evaluation["noise_ratio"]),
             "min_cluster_size": min_cluster_size,
             "min_samples": min_samples,
         }
+
+    return best_result
+
+
+def search_hdbscan_clusters(
+    reduced_points: np.ndarray,
+    embeddings: np.ndarray,
+    run_id: str | None = None,
+    started_at: float | None = None,
+) -> dict[str, Any] | None:
+    parameter_grid = build_hdbscan_parameter_grid(len(reduced_points))
+
+    if run_id:
+        log_progress(
+            run_id,
+            "cluster",
+            f"Trying HDBSCAN auto-tuning across {len(parameter_grid)} parameter set(s).",
+            started_at,
+        )
+
+    raw_results: list[tuple[int, int, np.ndarray, np.ndarray]] = []
+    for min_cluster_size, min_samples in parameter_grid:
+        labels, confidences = cluster_with_hdbscan(
+            reduced_points,
+            min_cluster_size=min_cluster_size,
+            min_samples=min_samples,
+        )
+        raw_results.append((min_cluster_size, min_samples, labels, confidences))
+
+    best_result = _select_best_from_grid(raw_results, embeddings, relaxed=False)
+    pass_label = "strict"
+
+    if best_result is None:
+        if run_id:
+            log_progress(
+                run_id,
+                "cluster",
+                "Strict pass found no valid candidate; trying relaxed thresholds with aggressive noise reassignment.",
+                started_at,
+            )
+        best_result = _select_best_from_grid(raw_results, embeddings, relaxed=True)
+        pass_label = "relaxed"
 
     if run_id:
         if best_result is None:
@@ -644,11 +711,11 @@ def search_hdbscan_clusters(
                 run_id,
                 "cluster",
                 (
-                    "Selected HDBSCAN config "
-                    f"(min_cluster_size={best_result['min_cluster_size']}, "
+                    f"Selected HDBSCAN config ({pass_label} pass, "
+                    f"min_cluster_size={best_result['min_cluster_size']}, "
                     f"min_samples={best_result['min_samples']}, "
                     f"clusters={best_result['cluster_count']}, "
-                    f"valid_candidates={valid_candidates}, "
+                    f"noise_after_reassignment={best_result['noise_ratio']:.1%}, "
                     f"reassigned_noise_rows={best_result['reassigned_noise_rows']})."
                 ),
                 started_at,
@@ -661,6 +728,9 @@ def reassign_noise_points(
     embeddings: np.ndarray,
     labels: np.ndarray,
     confidences: np.ndarray,
+    similarity_threshold: float = NOISE_REASSIGNMENT_SIMILARITY_THRESHOLD,
+    margin_threshold: float = NOISE_REASSIGNMENT_MARGIN_THRESHOLD,
+    dominant_similarity_threshold: float = DOMINANT_CLUSTER_REASSIGNMENT_SIMILARITY_THRESHOLD,
 ) -> tuple[np.ndarray, np.ndarray, int]:
     cluster_ids = sorted({int(label) for label in labels if label >= 0})
     noise_indices = np.where(labels < 0)[0]
@@ -703,13 +773,13 @@ def reassign_noise_points(
             cluster_sizes[target_cluster_id] / total_clustered if total_clustered else 0.0
         )
         required_similarity = (
-            DOMINANT_CLUSTER_REASSIGNMENT_SIMILARITY_THRESHOLD
+            dominant_similarity_threshold
             if target_cluster_share >= KMEANS_TARGET_MAX_CLUSTER_SHARE
-            else NOISE_REASSIGNMENT_SIMILARITY_THRESHOLD
+            else similarity_threshold
         )
         if similarity < required_similarity:
             continue
-        if similarity - second_best_similarity < NOISE_REASSIGNMENT_MARGIN_THRESHOLD:
+        if margin_threshold > 0 and similarity - second_best_similarity < margin_threshold:
             continue
         labels[index] = target_cluster_id
         confidences[index] = max(confidences[index], similarity)

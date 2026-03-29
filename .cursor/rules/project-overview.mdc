@@ -13,5 +13,6 @@ alwaysApply: true
 - Theme edits such as rename, merge, hide, and selected-theme state should stay synchronized with workspace session state.
 - Keep the product optimized for insight review: summary-first UX, cluster detail second, and diagnostics available but secondary.
 - Spreadsheet parsing and report export live in the Next.js app; semantic analysis is delegated to the Python service.
-- Local development expects `npm run dev` for Next.js and `npm run dev:python` for the FastAPI service.
+- Local development expects `npm run dev` for the full stack, `npm run dev:next` for Next.js only, and `npm run dev:python` for the FastAPI service.
 - This repo uses a newer Next.js version with breaking changes, so check the bundled Next.js docs in `node_modules/next/dist/docs/` before relying on older conventions.
+- Keep implementation changes and any corresponding `docs/*.md` specs aligned, especially for analysis pipeline and workflow behavior updates.

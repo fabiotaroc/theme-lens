@@ -1,0 +1,12 @@
+---
+description: Keep docs specs in sync with implementation changes
+alwaysApply: true
+---
+
+# Keep Docs Specs Updated
+
+- When implementation changes affect product behavior, data flow, or architecture, review the related `docs/*.md` spec files in the same task.
+- This is especially important for changes to the analysis or topic modelling pipeline, workspace flow, report generation, prompts, schemas, and exported outputs.
+- If a relevant spec already exists, update it so it matches the shipped behavior and naming.
+- If a major workflow or subsystem changes and no matching spec exists yet, add a new Markdown spec in `docs/` instead of leaving the behavior undocumented.
+- Do not leave stale specs behind after code changes.

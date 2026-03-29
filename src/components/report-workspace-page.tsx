@@ -34,6 +34,8 @@ export function ReportWorkspacePage() {
           eyebrow="Report"
           title="Package the story for sharing."
           description="The report view turns the current workspace into a concise, presentation-ready output that preserves the headline, the strongest themes, and the supporting evidence."
+          descriptionPlacement="popover"
+          descriptionInfoLabel="What the report view includes"
         />
         <EmptyState
           title="No report is available yet"

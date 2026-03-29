@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "setup:local": "npm install && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
-    "dev": "next dev",
+    "dev": "concurrently -k -n next,python -c cyan,magenta \"npm run dev:next\" \"npm run dev:python\"",
+    "dev:next": "next dev",
     "dev:python": ".venv/bin/python -m uvicorn api.python_analyze:app --reload --port 8000",
     "build": "next build",
     "start": "next start",
@@ -37,6 +38,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
+    "concurrently": "^9.2.0",
     "eslint-config-next": "16.2.1",
     "tailwindcss": "^4",
     "typescript": "^5"

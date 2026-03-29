@@ -161,8 +161,8 @@ export function PageHeader({
         <div className="max-w-3xl">
           <Eyebrow>{eyebrow}</Eyebrow>
           {descriptionPlacement === "popover" && description ? (
-            <div className="mt-4 flex items-start gap-2 sm:gap-3">
-              <h1 className="min-w-0 max-w-3xl flex-1 font-display text-4xl leading-[0.98] tracking-[-0.04em] text-foreground sm:text-5xl">
+            <div className="mt-4 flex w-full items-start justify-between gap-2 sm:gap-3">
+              <h1 className="min-w-0 flex-1 pr-2 font-display text-4xl leading-[0.98] tracking-[-0.04em] text-foreground sm:text-5xl">
                 {title}
               </h1>
               <Popover>
@@ -257,8 +257,8 @@ export function SectionIntro({
       <div className="max-w-3xl">
         {eyebrow ? <Eyebrow>{eyebrow}</Eyebrow> : null}
         {descriptionPlacement === "popover" && description ? (
-          <div className="mt-3 flex items-start gap-2">
-            <h2 className="min-w-0 flex-1 text-2xl font-semibold text-foreground sm:text-3xl">
+          <div className="mt-3 flex w-full items-start justify-between gap-2">
+            <h2 className="min-w-0 flex-1 pr-2 text-2xl font-semibold text-foreground sm:text-3xl">
               {title}
             </h2>
             <Popover>
